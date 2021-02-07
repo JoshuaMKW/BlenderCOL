@@ -1,374 +1,455 @@
+from bpy.props import (BoolProperty,
+                       FloatProperty,
+                       StringProperty,
+                       EnumProperty,
+                       IntProperty,
+                       PointerProperty,
+                       )
+from bpy_extras.io_utils import ExportHelper
+from bpy.app.handlers import persistent
+from bpy.types import PropertyGroup, Panel, Scene, Operator
+from btypes.big_endian import *
+from enum import Enum
+import threading
+import bmesh
+import bpy
+import random
+
 bl_info = {
     "name": "Export COL for Super Mario Sunshine",
     "author": "Blank",
-    "version": (1, 0, 0),
-    "blender": (2, 71, 0),
+    "version": (1, 0, 1),
+    "blender": (2, 80, 0),
     "location": "File > Export > Collision (.col)",
     "description": "This script allows you do export col files directly from blender. Based on Blank's obj2col",
     "warning": "Runs update function every 0.2 seconds",
     "category": "Import-Export"
 }
-import random
-import bpy
-import bmesh
-import threading
-from enum import Enum
-from btypes.big_endian import *
-from bpy.types import PropertyGroup, Panel, Scene, Operator
-from bpy.utils import register_class, unregister_class
-from bpy.app.handlers import persistent
-from bpy_extras.io_utils import ExportHelper
-from bpy.props import (BoolProperty,
-    FloatProperty,
-    StringProperty,
-    EnumProperty, 
-    IntProperty,
-    PointerProperty,
-    )
 
 
+def cleanResources():
+    bpy.ops.object.mode_set(mode="OBJECT")
     
-    
+    for obj in bpy.context.scene.objects:
+        obj.select_set(state=obj.type == "MESH")
+
+    bpy.ops.object.delete()
+
+    for block in bpy.data.meshes:
+        if block.users == 0:
+            bpy.data.meshes.remove(block)
+
+    for block in bpy.data.materials:
+        if block.users == 0:
+            bpy.data.materials.remove(block)
+
+    for block in bpy.data.textures:
+        if block.users == 0:
+            bpy.data.textures.remove(block)
+
+    for block in bpy.data.images:
+        if block.users == 0:
+            bpy.data.images.remove(block)
+
+
 class Header(Struct):
-    vertex_count = uint32
-    vertex_offset = uint32
-    group_count = uint32
-    group_offset = uint32
+    vertexCount = uint32
+    vertexOffset = uint32
+    groupCount = uint32
+    groupOffset = uint32
 
 
-class Vertex(Struct):
+class vertex(Struct):
     x = float32
     y = float32
     z = float32
 
-    def __init__(self,x,y,z):
+    def __init__(self, x, y, z):
         self.x = x
         self.y = y
         self.z = z
 
 
 class Group(Struct):
-    CollisionType = uint16 #Properties of collision. e.g. is it water? or what?
-    triangle_count = uint16
-    
-    __padding__ = Padding(1,b'\x00') #Group flags, set them to 0 here
-    has_ColParameter = bool8 #Set 0x0001 to 1 if we have ColParameter values so the game doesn't ignore it
-    __padding__ = Padding(2)#Actual padding
-    vertex_index_offset = uint32
-    TerrainType_offset = uint32 # 0-18,20,21,23,24,27-31
-    unknown_offset = uint32 # 0-27
-    ColParameter_offset = uint32 # 0,1,2,3,4,8,255,6000,7500,7800,8000,8400,9000,10000,10300,12000,14000,17000,19000,20000,21000,22000,27500,30300
+    collisionType = uint16  # Properties of collision. e.g. is it water? or what?
+    triangleCount = uint16
+
+    __padding__ = Padding(1, b"\x00")  # Group flags, set them to 0 here
+    # Set 0x0001 to 1 if we have colParameter values so the game doesn"t ignore it
+    hasColParameter = bool8
+    __padding__ = Padding(2)  # Actual padding
+    vertexindexOffset = uint32
+    terrainTypeOffset = uint32  # 0-18,20,21,23,24,27-31
+    unknownOffset = uint32  # 0-27
+    # 0,1,2,3,4,8,255,6000,7500,7800,8000,8400,9000,10000,10300,12000,14000,17000,19000,20000,21000,22000,27500,30300
+    colParameterOffset = uint32
 
 
-class Triangle:
+class Triangle(object):
 
     def __init__(self):
-        self.vertex_indices = None
-        self.ColType = 0
-        self.TerrainType = 0
+        self.vertexIndices = None
+        self.colType = 0
+        self.terrainType = 0
         self.unknown = 0
-        self.ColParameter = None
+        self.colParameter = None
 
     @property
-    def has_ColParameter(self):
-        return self.ColParameter is not None
+    def hasColParameter(self):
+        return self.colParameter is not None
 
 
-def pack(stream,vertices,triangles): #pack triangles into col file
+def pack(stream, vertices, triangles):  # pack triangles into col file
     groups = []
 
     for triangle in triangles:
-        for group in groups: #for each triangle add to appropriate group
-            if triangle.ColType != group.CollisionType: continue #break out of loop to next cycle
+        for group in groups:  # for each triangle add to appropriate group
+            if triangle.colType != group.collisionType:
+                continue  # break out of loop to next cycle
             group.triangles.append(triangle)
             break
-        else: #if no group has been found
-            group = Group() #create a new group
-            group.CollisionType = triangle.ColType
-            group.has_ColParameter = triangle.has_ColParameter
+        else:  # if no group has been found
+            group = Group()  # create a new group
+            group.collisionType = triangle.colType
+            group.hasColParameter = triangle.hasColParameter
             group.triangles = [triangle]
-            groups.append(group) #add to list of groups
+            groups.append(group)  # add to list of groups
 
     header = Header()
-    header.vertex_count = len(vertices)
-    header.vertex_offset = Header.sizeof() + Group.sizeof()*len(groups)
-    header.group_count = len(groups)
-    header.group_offset = Header.sizeof()
-    Header.pack(stream,header) 
+    header.vertexCount = len(vertices)
+    header.vertexOffset = Header.sizeof() + Group.sizeof()*len(groups)
+    header.groupCount = len(groups)
+    header.groupOffset = Header.sizeof()
+    Header.pack(stream, header)
 
-    stream.write(b'\x00'*Group.sizeof()*len(groups))
+    stream.write(b"\x00"*Group.sizeof()*len(groups))
 
     for vertex in vertices:
-        Vertex.pack(stream,vertex)
+        vertex.pack(stream, vertex)
 
     for group in groups:
-        group.triangle_count = len(group.triangles)
-        group.vertex_index_offset = stream.tell()
+        group.triangleCount = len(group.triangles)
+        group.vertexindexOffset = stream.tell()
         for triangle in group.triangles:
-            uint16.pack(stream,triangle.vertex_indices[0])
-            uint16.pack(stream,triangle.vertex_indices[1])
-            uint16.pack(stream,triangle.vertex_indices[2])
+            uint16.pack(stream, triangle.vertexIndices[0])
+            uint16.pack(stream, triangle.vertexIndices[1])
+            uint16.pack(stream, triangle.vertexIndices[2])
 
     for group in groups:
-        group.TerrainType_offset = stream.tell()
+        group.terrainTypeOffset = stream.tell()
         for triangle in group.triangles:
-            uint8.pack(stream,triangle.TerrainType)
+            uint8.pack(stream, triangle.terrainType)
 
     for group in groups:
-        group.unknown_offset = stream.tell()
+        group.unknownOffset = stream.tell()
         for triangle in group.triangles:
-            uint8.pack(stream,triangle.unknown)
+            uint8.pack(stream, triangle.unknown)
 
     for group in groups:
-        if not group.has_ColParameter:
-            group.ColParameter_offset = 0
+        if not group.hasColParameter:
+            group.colParameterOffset = 0
         else:
-            group.ColParameter_offset = stream.tell()
+            group.colParameterOffset = stream.tell()
             for triangle in group.triangles:
-                if triangle.ColParameter is not None:
-                    uint16.pack(stream,triangle.ColParameter)
+                if triangle.colParameter is not None:
+                    uint16.pack(stream, triangle.colParameter)
                 else:
-                    uint16.pack(stream,0)
+                    uint16.pack(stream, 0)
 
-    stream.seek(header.group_offset)
+    stream.seek(header.groupOffset)
     for group in groups:
-        Group.pack(stream,group)
-        
+        Group.pack(stream, group)
+
+
 def unpack(stream):
     header = Header.unpack(stream)
 
-    stream.seek(header.group_offset)
-    groups = [Group.unpack(stream) for _ in range(header.group_count)]
+    stream.seek(header.groupOffset)
+    groups = [Group.unpack(stream) for _ in range(header.groupCount)]
 
-    stream.seek(header.vertex_offset)
-    vertices = [Vertex.unpack(stream) for _ in range(header.vertex_count)]
+    stream.seek(header.vertexOffset)
+    vertices = [vertex.unpack(stream) for _ in range(header.vertexCount)]
 
     for group in groups:
-        group.triangles = [Triangle() for _ in range(group.triangle_count)]
+        group.triangles = [Triangle() for _ in range(group.triangleCount)]
         for triangle in group.triangles:
-            triangle.ColType = group.CollisionType
+            triangle.colType = group.collisionType
 
     for group in groups:
-        stream.seek(group.vertex_index_offset)
+        stream.seek(group.vertexindexOffset)
         for triangle in group.triangles:
-            triangle.vertex_indices = [uint16.unpack(stream) for _ in range(3)]
+            triangle.vertexIndices = [uint16.unpack(stream) for _ in range(3)]
 
     for group in groups:
-        stream.seek(group.TerrainType_offset)
+        stream.seek(group.terrainTypeOffset)
         for triangle in group.triangles:
-            triangle.TerrainType = uint8.unpack(stream)
+            triangle.terrainType = uint8.unpack(stream)
 
     for group in groups:
-        stream.seek(group.unknown_offset)
+        stream.seek(group.unknownOffset)
         for triangle in group.triangles:
             triangle.unknown = uint8.unpack(stream)
 
     for group in groups:
-        if not group.has_ColParameter: continue
-        stream.seek(group.ColParameter_offset)
+        if not group.hasColParameter:
+            continue
+        stream.seek(group.colParameterOffset)
         for triangle in group.triangles:
-            triangle.ColParameter = uint16.unpack(stream)
+            triangle.colParameter = uint16.unpack(stream)
 
-    triangles = sum((group.triangles for group in groups),[])
+    triangles = sum((group.triangles for group in groups), [])
 
-    return vertices,triangles
+    return vertices, triangles
 
-class ImportCOL(Operator, ExportHelper): #Operator that exports the collision model into .col file
+
+# Operator that exports the collision model into .col file
+class ImportCOL(Operator, ExportHelper):
     """Import a COL file"""
     bl_idname = "import_mesh.col"
     bl_label = "Import COL"
-    filter_glob = StringProperty( 
+    filter_glob: StringProperty(
         default="*.col",
-        options={'HIDDEN'},
-    )#This property filters what you see in the file browser to just .col files
+        options={"HIDDEN"},
+    )  # This property filters what you see in the file browser to just .col files
 
     check_extension = True
-    filename_ext = ".col" #This is the extension that the model will have
+    filename_ext = ".col"  # This is the extension that the model will have
+
     def execute(self, context):
-        ColStream = open(self.filepath,'rb')
-        CollisionVertexList = [] #Store a list of verticies
-        Triangles = [] #List of triangles, each containing indicies of verticies
-        CollisionVertexList,Triangles = unpack(ColStream)
+        #cleanResources()
 
-            
+        collisionvertexList = []  # Store a list of verticies
+        triangles = []  # List of triangles, each containing indicies of verticies
+        with open(self.filepath, "rb") as colStream:
+            collisionvertexList, triangles = unpack(colStream)
+
         mesh = bpy.data.meshes.new("mesh")  # add a new mesh
-        obj = bpy.data.objects.new("CollisionObj", mesh)  # add a new object using the mesh
+        # add a new object using the mesh
+        obj = bpy.data.objects.new("Collisionobj", mesh)
 
-        scene = bpy.context.scene
+        scene = bpy.context.collection
         scene.objects.link(obj)  # put the object into the scene (link)
-        scene.objects.active = obj  # set as the active object in the scene
-        obj.select = True  # select object
+        context.view_layer.objects.active = obj  # make object active
+        obj.select_set(True)  # select object
 
         mesh = obj.data
         bm = bmesh.new()
-        BMeshVertexList = []
-        
-        
-        for v in CollisionVertexList:
-            BMeshVertexList.append(bm.verts.new((v.x,-v.z,v.y)))  # add a new vert
-                
-        for f in Triangles:
-            try: #Try and catch to avoid exception on duplicate triangles. Dodgy...
-                MyFace = bm.faces.new((BMeshVertexList[f.vertex_indices[0]],BMeshVertexList[f.vertex_indices[1]],BMeshVertexList[f.vertex_indices[2]]))
-                for i in range(0,len(obj.data.materials)): #Scan materials to find match
+        bMeshvertexList = []
+
+        for v in collisionvertexList:
+            bMeshvertexList.append(bm.verts.new(
+                (v.x, -v.z, v.y)))  # add a new vert
+
+        for f in triangles:
+            try:  # Try and catch to avoid exception on duplicate triangles. Dodgy...
+                MyFace = bm.faces.new(
+                    (bMeshvertexList[f.vertexIndices[0]], bMeshvertexList[f.vertexIndices[1]], bMeshvertexList[f.vertexIndices[2]]))
+                for i in range(len(obj.data.materials)):  # Scan materials to find match
                     mat = obj.data.materials[i]
-                    if f.ColType == mat.ColEditor.ColType and f.TerrainType == mat.ColEditor.TerrainType and f.unknown == mat.ColEditor.UnknownField:#Equate unknowns
-                        ColParameterAreEqual = (f.ColParameter == mat.ColEditor.ColParameterField)
-                        ColParameterDontExist = f.ColParameter is None and mat.ColEditor.HasColParameterField is False #If the ColParameter doesn't exist we need to check for that case
-                        if ColParameterAreEqual or ColParameterDontExist:
+                    if f.colType == mat.colEditor.colType and f.terrainType == mat.colEditor.terrainType and f.unknown == mat.colEditor.UnknownField:  # Equate unknowns
+                        colParameterAreEqual = (
+                            f.colParameter == mat.colEditor.colParameterField)
+                        # If the colParameter doesn"t exist we need to check for that case
+                        colParameterDontExist = f.colParameter is None and mat.colEditor.hasColParameterField is False
+                        if colParameterAreEqual or colParameterDontExist:
                             MyFace.material_index = i
-                            break #We assigned our material 
-                else: #We did not find a material that matched
-                    MaterialName = str(f.ColType) + "," + str(f.TerrainType) + "," + str(f.unknown) + "," + str(f.ColParameter)
+                            break  # We assigned our material
+                else:  # We did not find a material that matched
+                    MaterialName = str(f.colType) + "," + str(f.terrainType) + \
+                        "," + str(f.unknown) + "," + str(f.colParameter)
                     mat = bpy.data.materials.new(name=MaterialName)
-                    
-                    random.seed(hash(MaterialName)) #Not actually random
+
+                    random.seed(hash(MaterialName))  # Not actually random
                     Red = random.random()
                     Green = random.random()
                     Blue = random.random()
-                    mat.diffuse_color = (Red,Green,Blue)
-                    
-                    mat.ColEditor.ColType = f.ColType#Set collision values
-                    mat.ColEditor.TerrainType = f.TerrainType
-                    mat.ColEditor.UnknownField = f.unknown
-                    
-                    if f.ColParameter is not None:
-                        mat.ColEditor.HasColParameterField = True
-                        mat.ColEditor.ColParameterField = f.ColParameter
+                    mat.diffuse_color = (Red, Green, Blue, 1.0)
+
+                    mat.colEditor.colType = f.colType  # Set collision values
+                    mat.colEditor.terrainType = f.terrainType
+                    mat.colEditor.UnknownField = f.unknown
+
+                    if f.colParameter is not None:
+                        mat.colEditor.hasColParameterField = True
+                        mat.colEditor.colParameterField = f.colParameter
                     else:
-                        mat.ColEditor.HasColParameterField = False
-                        mat.ColEditor.ColParameterField = 0 
-                    obj.data.materials.append(mat) #add material to our object
-                    MyFace.material_index = len(obj.data.materials) - 1 #Since material was just added it will be the last index
+                        mat.colEditor.hasColParameterField = False
+                        mat.colEditor.colParameterField = 0
+                    # add material to our object
+                    obj.data.materials.append(mat)
+                    # Since material was just added it will be the last index
+                    MyFace.material_index = len(obj.data.materials) - 1
             except:
                 continue
-        
+
         bm.to_mesh(mesh)
         mesh.update()
         bm.free()
-        
-        return{'FINISHED'}
 
-class ExportCOL(Operator, ExportHelper): #Operator that exports the collision model into .col file
+        for area in context.screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+
+            area.spaces.active.clip_end = 1000000
+            area.spaces.active.clip_start = 50
+
+            for region in area.regions:
+                if region.type == "WINDOW":
+                    override = {"area": area, "region": region, "edit_object": bpy.context.edit_object}
+                    bpy.ops.view3d.view_all(override, center=True)
+
+        return {"FINISHED"}
+
+
+# Operator that exports the collision model into .col file
+class ExportCOL(Operator, ExportHelper):
     """Save a COL file"""
     bl_idname = "export_mesh.col"
     bl_label = "Export COL"
-    filter_glob = StringProperty( 
+    filter_glob: StringProperty(
         default="*.col",
-        options={'HIDDEN'},
-    )#This property filters what you see in the file browser to just .col files
+        options={"HIDDEN"},
+    )  # This property filters what you see in the file browser to just .col files
 
     check_extension = True
-    filename_ext = ".col" #This is the extension that the model will have
-	
-	#To do: add material presets
-    
-    Scale = FloatProperty(
+    filename_ext = ".col"  # This is the extension that the model will have
+
+    # To do: add material presets
+
+    Scale: FloatProperty(
         name="Scale factor",
         description="Scale the col file by this amount",
         default=1,
     )
-	
-    def execute(self, context):        # execute() is called by blender when running the operator.
-        VertexList = [] #Store a list of verticies
-        Triangles = [] #List of triangles, each containing indicies of verticies
-        IndexOffset = 0 #Since each object starts their vertex indicies at 0, we need to shift these indicies once we add elements to the vertex list from various objects
-        for Obj in bpy.context.scene.objects: #for all objects
-            bpy.ops.object.mode_set(mode = 'OBJECT')#Set mode to be object mode
-            if Obj.type != 'MESH':
-                continue
-            bm = bmesh.new() #Define new bmesh
-            MyMesh = Obj.to_mesh(context.scene, True, 'PREVIEW')#make a copy of the object we can modify freely
-            bm.from_mesh(MyMesh) #Add the above copy into the bmesh
-            bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method=0, ngon_method=0) #triangulate bmesh
 
-            for Vert in bm.verts:
-                VertexList.append(Vertex(Vert.co.x*self.Scale,Vert.co.z*self.Scale,-Vert.co.y*self.Scale)) #add in verts, make sure y is up
+    # execute() is called by blender when running the operator.
+    def execute(self, context):
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.transform_apply()
+
+        vertexList = []  # Store a list of verticies
+        triangles = []  # List of triangles, each containing indicies of verticies
+        indexOffset = 0  # Since each object starts their vertex indicies at 0, we need to shift these indicies once we add elements to the vertex list from various objects
+        
+        for obj in bpy.context.scene.objects:  # for all objects
+            # Set mode to be object mode
+            if obj.type != "MESH":
+                continue
+            bm = bmesh.new()  # Define new bmesh
+            # make a copy of the object we can modify freely
+            depsgraph = context.evaluated_depsgraph_get()
+            mesh = obj.evaluated_get(depsgraph).to_mesh()
+            bm.from_mesh(mesh)  # Add the above copy into the bmesh
+            # triangulate bmesh
+            bmesh.ops.triangulate(
+                bm, faces=bm.faces)
+
+            for vert in bm.verts:
+                # add in verts, make sure y is up
+                vertexList.append(
+                    vertex(vert.co.x*self.Scale, vert.co.z*self.Scale, -vert.co.y*self.Scale))
 
             for Face in bm.faces:
-                MyTriangle = Triangle()
-                MyTriangle.vertex_indices = [Face.verts[0].index + IndexOffset,Face.verts[1].index + IndexOffset,Face.verts[2].index + IndexOffset] #add three vertex indicies
+                myTriangle = Triangle()
+                myTriangle.vertexIndices = [Face.verts[0].index + indexOffset, Face.verts[1].index +
+                                             indexOffset, Face.verts[2].index + indexOffset]  # add three vertex indicies
 
-                slot = Obj.material_slots[Face.material_index]
-                mat = slot.material.ColEditor
+                slot = obj.material_slots[Face.material_index]
+                mat = slot.material.colEditor
                 if mat is not None:
-                    MyTriangle.ColType = mat.ColType
-                    MyTriangle.TerrainType = mat.TerrainType
-                    MyTriangle.unknown = mat.UnknownField
-                    if mat.HasColParameterField == True:
-                        MyTriangle.ColParameter = mat.ColParameterField
-                Triangles.append(MyTriangle) #add triangles
+                    myTriangle.colType = mat.colType
+                    myTriangle.terrainType = mat.terrainType
+                    myTriangle.unknown = mat.UnknownField
+                    if mat.hasColParameterField == True:
+                        myTriangle.colParameter = mat.colParameterField
+                triangles.append(myTriangle)  # add triangles
             bm.free()
             del bm
-            IndexOffset = len(VertexList)#set offset
+            indexOffset = len(vertexList)  # set offset
 
-        ColStream = open(self.filepath,'wb')
-        pack(ColStream,VertexList,Triangles)
-        return {'FINISHED'}            # this lets blender know the operator finished successfully.
+        with open(self.filepath, "wb") as colStream:
+            pack(colStream, vertexList, triangles)
+        # this lets blender know the operator finished successfully.
+        return {"FINISHED"}
 
-class CollisionProperties(PropertyGroup): #This defines the UI elements
-    ColType = IntProperty(name = "Collision type",default=0, min=0, max=65535) #Here we put parameters for the UI elements and point to the Update functions
-    TerrainType = IntProperty(name = "Sound",default=0, min=0, max=255)
-    UnknownField = IntProperty(name = "Unknown",default=0, min=0, max=255)#I probably should have made these an array
-    HasColParameterField = BoolProperty(name="Has Parameter", default=False)
-    ColParameterField = IntProperty(name = "Parameter",default=0, min=0, max=65535)
 
-class CollisionPanel(Panel): #This panel houses the UI elements defined in the CollisionProperties
+class CollisionProperties(PropertyGroup):  # This defines the UI elements
+    # Here we put parameters for the UI elements and point to the Update functions
+    colType: IntProperty(name="Collision type", default=0, min=0, max=65535)
+    terrainType: IntProperty(name="Sound", default=0, min=0, max=255)
+    # I probably should have made these an array
+    UnknownField: IntProperty(name="Unknown", default=0, min=0, max=255)
+    hasColParameterField: BoolProperty(name="Has Parameter", default=False)
+    colParameterField: IntProperty(
+        name="Parameter", default=0, min=0, max=65535)
+
+
+# This panel houses the UI elements defined in the CollisionProperties
+class COLLISION_PT_panel(Panel):
     bl_label = "Edit Collision Values"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "material"
- 
+
     @classmethod
-    def poll(cls, context):#stolen from blender
-        mat = context.material
-        engine = context.scene.render.engine
-        return check_material(mat) and (mat.type in {'SURFACE', 'WIRE'})
-    
+    def poll(cls, context):  # stolen from blender
+        return check_material(context.material)
+
     def draw(self, context):
-        mat = context.material.ColEditor
-        column1 = self.layout.column(align = True)
-        column1.prop(mat,"ColType")
-        column1.prop(mat,"TerrainType")
-        column1.prop(mat,"UnknownField")
-        
-        column1.prop(mat,"HasColParameterField")
-        column2 = self.layout.column(align = True)
-        column2.prop(mat,"ColParameterField")
-        column2.enabled = mat.HasColParameterField #must have "Has ColParameter" checked
-        
-       
+        mat = context.material.colEditor
+        column1 = self.layout.column(align=True)
+        column1.prop(mat, "colType")
+        column1.prop(mat, "terrainType")
+        column1.prop(mat, "UnknownField")
+
+        column1.prop(mat, "hasColParameterField")
+        column2 = self.layout.column(align=True)
+        column2.prop(mat, "colParameterField")
+        # must have "Has colParameter" checked
+        column2.enabled = mat.hasColParameterField
+
+
 def check_material(mat):
     if mat is not None:
         if mat.use_nodes:
-            if mat.active_node_material is not None:
+            if mat.active_material is not None:
                 return True
             return False
         return True
     return False
-    
-classes = (ExportCOL,ImportCOL, CollisionPanel,CollisionProperties) #list of classes to register/unregister  
+
+
+__classes__ = (ExportCOL,
+               ImportCOL,
+               COLLISION_PT_panel,
+               CollisionProperties)  # list of classes to register/unregister
+
+
 def register():
-    for i in classes:
-        register_class(i)
-    bpy.types.Material.ColEditor = PointerProperty(type=CollisionProperties) #store in the scene
-    bpy.types.INFO_MT_file_export.append(menu_export) #Add to export menu
-    bpy.types.INFO_MT_file_import.append(menu_import) #Add to import menu
-    
+    from bpy.utils import register_class, unregister_class
+    for cls in __classes__:
+        register_class(cls)
+    bpy.types.Material.colEditor = PointerProperty(
+        type=CollisionProperties)  # store in the scene
+    bpy.types.TOPBAR_MT_file_export.append(menu_export)  # Add to export menu
+    bpy.types.TOPBAR_MT_file_import.append(menu_import)  # Add to import menu
+
+
+def unregister():
+    from bpy.utils import register_class, unregister_class
+    for cls in reversed(__classes__):
+        unregister_class(cls)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_export)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_import)
+
 
 def menu_export(self, context):
     self.layout.operator(ExportCOL.bl_idname, text="Collision (.col)")
-    
+
+
 def menu_import(self, context):
     self.layout.operator(ImportCOL.bl_idname, text="Collision (.col)")
-    
-def unregister():
-    for i in classes:
-        unregister_class(i)
-    bpy.types.INFO_MT_file_export.remove(menu_export)
-    bpy.types.INFO_MT_file_import.remove(menu_import)
 
-    
 
 # This allows you to run the script directly from blenders text editor
 # to test the addon without having to install it.
