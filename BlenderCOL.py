@@ -291,7 +291,7 @@ class ImportCOL(Operator, ExportHelper):
                 continue
 
             area.spaces.active.clip_end = 1000000
-            area.spaces.active.clip_start = 50
+            area.spaces.active.clip_start = 100
 
             for region in area.regions:
                 if region.type == "WINDOW":
